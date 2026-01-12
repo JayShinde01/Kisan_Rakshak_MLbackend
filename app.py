@@ -151,4 +151,5 @@ def _predict_response(filepath: str, render_html: bool = False):
 
 if __name__ == "__main__":
     # Change host/port/debug as you like. For production use a WSGI server (gunicorn, waitress, etc.)
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    port = int(os.environ.get("PORT",5000))
+    app.run(host="0.0.0.0", port=port, debug=True)
