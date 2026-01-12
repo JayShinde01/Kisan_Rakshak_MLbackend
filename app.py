@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, url_for
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import tensorflow as tf
@@ -7,6 +7,8 @@ import os
 import time
 import uuid
 import logging
+import numpy as np
+import threading
 
 # -----------------------
 # Configure logging
@@ -24,13 +26,11 @@ app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8MB limit
 
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "bmp", "gif", "tiff"}
 
-
 def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
-
 # -----------------------
-# Use TensorFlow Lite model for low RAM
+# Load TFLite model
 MODEL_PATH = os.environ.get("MODEL_PATH", "model/best_efficientnet_model.tflite")
 logger.info("📌 Loading TFLite model from: %s", MODEL_PATH)
 
@@ -39,6 +39,13 @@ interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 logger.info("✅ TFLite model loaded successfully.")
+
+# Model input shape
+input_shape = input_details[0]['shape']  # e.g., [1, 256, 256, 3]
+input_height, input_width = input_shape[1], input_shape[2]
+
+# Thread lock for TFLite
+lock = threading.Lock()
 
 # Class names
 class_names = [
@@ -50,7 +57,6 @@ class_names = [
 @app.route("/")
 def home():
     return jsonify({"status": "API is running"})
-
 
 @app.route("/predict", methods=["POST"])
 def web_predict():
@@ -70,7 +76,6 @@ def web_predict():
     file.save(filepath)
 
     return _predict_response(filepath, render_html=True)
-
 
 @app.route("/api/predict", methods=["POST"])
 def api_predict():
@@ -92,25 +97,31 @@ def api_predict():
 
     return _predict_response(filepath, render_html=False)
 
-
+# -----------------------
 def _predict_response(filepath: str, render_html: bool = False):
     try:
-        # Load and preprocess image (smaller size 224x224)
-        img = load_img(filepath, target_size=(224, 224))
+        # Load and preprocess image with model's input size
+        img = load_img(filepath, target_size=(input_height, input_width))
         img_array = img_to_array(img)
-        img_array = tf.expand_dims(img_array, axis=0)
-        img_array = img_array.astype(input_details[0]['dtype'])
+        img_array = np.expand_dims(img_array, axis=0).astype(input_details[0]['dtype'])
 
-        # Run inference
-        interpreter.set_tensor(input_details[0]['index'], img_array)
-        interpreter.invoke()
-        prediction = interpreter.get_tensor(output_details[0]['index'])[0]
+        # Normalize if model expects float input
+        if np.issubdtype(input_details[0]['dtype'], np.floating):
+            img_array = img_array / 255.0
 
+        # Thread-safe inference
+        with lock:
+            interpreter.set_tensor(input_details[0]['index'], img_array)
+            interpreter.invoke()
+            prediction = interpreter.get_tensor(output_details[0]['index'])[0]
+
+        # Get top-1 prediction
         idx = int(prediction.argmax())
         label = class_names[idx] if 0 <= idx < len(class_names) else f"class_{idx}"
         confidence = round(float(prediction[idx]) * 100, 2)
 
-        file_url = f"{request.host_url.rstrip('/')}/{app.config['UPLOAD_FOLDER'].replace(os.path.sep, '/')}/{os.path.basename(filepath)}"
+        # File URL
+        file_url = url_for('static', filename=f"uploads/{os.path.basename(filepath)}", _external=True)
 
         if render_html:
             return render_template(
@@ -132,8 +143,7 @@ def _predict_response(filepath: str, render_html: bool = False):
             return render_template("index.html", error=f"Prediction Error: {e}")
         return jsonify({"error": str(e)}), 500
 
-
+# -----------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    # debug=False to save RAM
     app.run(host="0.0.0.0", port=port, debug=False)
