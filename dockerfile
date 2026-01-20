@@ -13,4 +13,5 @@ COPY . .
 EXPOSE 5000
 
 # Use Gunicorn with 1 worker to save RAM
-CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:5000", "app:app"]
+CMD ["gunicorn", "--preload", "-w", "1", "-b", "0.0.0.0:5000", "app:app"]
+
